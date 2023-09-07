@@ -1,0 +1,528 @@
+;;; -*- Mode: Lisp; Package: SDRAW -*-
+;;;
+;;; SDRAW - draws cons cell structures.
+;;;
+;;; From the book "Common Lisp:  A Gentle Introduction to
+;;;      Symbolic Computation" by David S. Touretzky.  
+;;; The Benjamin/Cummings Publishing Co., 1990.
+;;;
+;;; This version is for Golden Common Lisp version 3.01 and up.
+;;; Revised to include support for circular structures.
+;;;
+;;; User-level routines:
+;;;   (SDRAW obj)  - draws obj on the display
+;;;   (SDRAW-LOOP) - puts the user in a read-eval-draw loop
+;;;   (SCRAWL obj) - interactively crawl around obj
+;;;
+;;; Variables:
+;;;   *SDRAW-PRINT-CIRCLE*    If bound, overrides *PRINT-CIRCLE*.
+;;;   *SDRAW-LEADING-ARROW*   Initially NIL.  Set to T to get leading arrows.
+;;;
+
+(setq gclisp::*inhibit-system-redefinition-warnings* t)
+ 
+(in-package "SDRAW" :use '("LISP" "GCLISP"))
+
+(export '(SDRAW::SDRAW SDRAW::SDRAW-LOOP SDRAW::SCRAWL
+	  SDRAW::*SDRAW-PRINT-CIRCLE* SDRAW::*SDRAW-LEADING-ARROW*))
+ 
+(shadowing-import '(SDRAW::SDRAW SDRAW::SDRAW-LOOP SDRAW::SCRAWL
+		    SDRAW::*SDRAW-PRINT-CIRCLE*
+		    SDRAW::*SDRAW-LEADING-ARROW*)
+		  (find-package "USER"))
+ 
+(use-package "SDRAW" "USER")
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;
+;;; The parameters below are in units of characters (horizontal)
+;;; and lines (vertical).  They apply to all versions of SDRAW,
+;;; but their values may change if cons cells are being drawn as
+;;; bit maps rather than as character sequences.
+
+(defparameter *sdraw-display-width* 79.)
+(defparameter *sdraw-display-height* 25)
+(defparameter *sdraw-vertical-cutoff* 22.)
+(defparameter *sdraw-horizontal-atom-cutoff* 79.)
+(defparameter *sdraw-horizontal-cons-cutoff* 65.)
+
+(defparameter *etc-string* "etc.")
+(defparameter *etc-spacing* 4.)
+
+(defparameter *inter-atom-h-spacing* 3.)
+(defparameter *cons-atom-h-arrow-length* 9.)
+(defparameter *inter-cons-v-arrow-length* 3.)
+(defparameter *cons-v-arrow-offset-threshold* 2.)
+(defparameter *cons-v-arrow-offset-value* 1.)
+(defparameter *leading-arrow-length* 4)
+
+(defparameter *sdraw-num-lines* 25)
+(defparameter *sdraw-vertical-cutoff* 22.)
+
+(defvar *sdraw-leading-arrow* nil)
+(defvar *sdraw-print-circle*)
+(defvar *sdraw-circular-switch*)
+(defvar *circ-detected* nil)
+(defvar *circ-label-counter* 0)
+(defvar *circ-hash-table* (make-hash-table :test #'eq :size 20))
+
+(defvar *line-endings* (make-array *sdraw-num-lines*))
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;
+;;; SDRAW and subordinate definitions.
+
+(defun sdraw (obj &aux (*circ-detected* nil))
+  (let ((*sdraw-circular-switch*
+	 (if (boundp '*sdraw-print-circle*) *sdraw-print-circle*
+	     *print-circle*))
+	(start-col (if *sdraw-leading-arrow* *leading-arrow-length* 0)))
+    (init-struct1 start-col)
+    (clrhash *circ-hash-table*)
+    (let* ((first-layout (struct1 obj 0 start-col 0 nil))
+	   (second-layout (when *circ-detected*
+			    (init-struct1 start-col)
+			    (struct1 obj 0 start-col 0 t))))
+      (clear-window)
+      (clear-term)
+      (draw-structure (or second-layout first-layout))
+      (set-term-pos 0 20))))
+
+
+
+(defun init-struct1 (start-col)
+  (setf *circ-label-counter* 0)
+  (fill *line-endings* -2)
+  (struct-record-position 0 (- start-col *inter-atom-h-spacing*)))
+
+(defun never-seen? (obj)
+  (null (gethash obj *circ-hash-table*)))
+
+(defun seen-twice? (obj)
+  (numberp (gethash obj *circ-hash-table*)))
+
+(defun needs-label? (obj)
+  (zerop (gethash obj *circ-hash-table*)))
+
+
+
+(defun struct1 (obj row root-col adj second-pass)
+  (cond ((>= row *sdraw-vertical-cutoff*) (struct-process-etc row root-col adj))
+	((not second-pass)
+	 (enter-in-hash-table obj)
+	 (struct-first-pass obj row root-col adj))
+	(t (struct-second-pass obj row root-col adj))))
+
+(defun enter-in-hash-table (obj)
+  (unless (or (not *sdraw-circular-switch*)
+	      (numberp obj)
+	      (and (symbolp obj) (symbol-package obj)))
+    (cond ((never-seen? obj) (setf (gethash obj *circ-hash-table*) t))
+	  (t (setf (gethash obj *circ-hash-table*) 0)
+	     (setf *circ-detected* t)))))
+
+(defun struct-first-pass (obj row root-col adj)
+  (if (seen-twice? obj)
+      (struct-process-circ-reference obj row root-col adj)
+      (if (atom obj)
+	  (struct-unlabeled-atom (format nil "~S" obj) row root-col adj)
+	  (struct-unlabeled-cons obj row root-col adj nil))))
+
+(defun struct-second-pass (obj row root-col adj)
+  (cond ((not (seen-twice? obj))
+	 (if (atom obj)
+	     (struct-unlabeled-atom (format nil "~S" obj) row root-col adj)
+	     (struct-unlabeled-cons obj row root-col adj t)))
+	((needs-label? obj)
+	 (if (atom obj)
+	     (struct-label-atom obj row root-col adj)
+	     (struct-label-cons obj row root-col adj)))
+	(t (struct-process-circ-reference obj row root-col adj))))
+
+
+;;; Handle the simplest case:  an atom or cons with no #n= label.
+
+(defun struct-unlabeled-atom (atom-string row root-col adj)
+  (let* ((start-col (struct-find-start row root-col adj))
+	 (end-col (+ start-col adj (length atom-string))))
+    (cond ((< end-col *sdraw-horizontal-atom-cutoff*)
+	   (struct-record-position row end-col)
+	   (list 'atom row (+ start-col adj) atom-string))
+	  (t (struct-process-etc row root-col adj)))))
+
+(defun struct-unlabeled-cons (obj row root-col adj second-pass)
+  (let* ((cons-start (struct-find-start row root-col adj))
+	 (car-structure
+	  (struct1 (car obj)
+		   (+ row *inter-cons-v-arrow-length*)
+		   cons-start adj second-pass))
+	 (start-col (third car-structure)))
+    (if (>= start-col *sdraw-horizontal-cons-cutoff*)
+	(struct-process-etc row root-col adj)
+	(progn
+	  (struct-record-position row (- (+ start-col
+					    *cons-atom-h-arrow-length*)
+					 adj *inter-atom-h-spacing*))
+	  (list 'cons row start-col car-structure
+		(struct1 (cdr obj) row (+ start-col *cons-atom-h-arrow-length*)
+			 0 second-pass))))))
+
+(defun struct-process-etc (row root-col adj)
+  (let ((start-col (struct-find-start row root-col adj)))
+    (struct-record-position
+      row
+      (+ start-col adj (length *etc-string*) *etc-spacing*))
+    (list 'msg row (+ start-col adj) *etc-string*)))
+
+
+
+
+;;; Handle objects that need to be labeled with #n=.
+;;; Called only on the second pass.
+
+(defun struct-label-atom (obj row root-col adj)
+  (assign-label obj)
+  (let* ((circ-string (format nil "#~S=" (gethash obj *circ-hash-table*)))
+	 (newadj (struct-find-adj row root-col adj (length circ-string)))
+	 (atom-string (format nil "~S" obj))
+	 (start-col (struct-find-start row root-col adj))
+	 (end-col (+ start-col newadj (length atom-string))))
+    (cond ((< end-col *sdraw-horizontal-atom-cutoff*)
+	   (struct-record-position row end-col)
+	   (list 'atom row (+ start-col newadj) atom-string circ-string))
+	  (t (struct-process-etc row root-col adj)))))
+
+(defun struct-label-cons (obj row root-col adj)
+  (assign-label obj)
+  (let* ((string (format nil "#~S=" *circ-label-counter*))
+	 (newadj (struct-find-adj row root-col adj (length string)))
+	 (cons-start (struct-find-start row root-col adj))
+	 (car-structure
+	  (struct1 (car obj)
+		   (+ row *inter-cons-v-arrow-length*)
+		   cons-start newadj t))
+	 (start-col (third car-structure)))
+    (if (>= start-col *sdraw-horizontal-cons-cutoff*)
+	(struct-process-etc row root-col adj)
+	(progn
+	  (struct-record-position row (- (+ start-col
+					    *cons-atom-h-arrow-length*)
+					 adj *inter-atom-h-spacing*))
+	  (list 'cons row start-col car-structure
+		(struct1 (cdr obj) row
+			 (+ start-col *cons-atom-h-arrow-length*) 0 t)
+		string)))))
+
+(defun assign-label (obj)
+  (setf (gethash obj *circ-hash-table*)
+	(incf *circ-label-counter*)))
+
+
+;;; Handle circular references by displaying them as #n#.
+;;; When called on the first pass, this function always uses a label of 0.
+;;; It will get the label right on the second pass.
+
+(defun struct-process-circ-reference (obj row root-col adj)
+  (let ((start-col (struct-find-start row root-col adj))
+	(string (format nil "#~S#" (gethash obj *circ-hash-table*))))
+    (struct-record-position
+      row
+      (+ (+ start-col adj) (length string)))
+    (list 'msg row (+ start-col adj) string)))
+
+
+
+;;; Support functions.
+
+(defun struct-find-start (row root-col adj)
+  (max root-col
+       (- (+ *inter-atom-h-spacing* (aref *line-endings* row)) adj)))
+
+(defun struct-find-adj (row col adj size)
+  (let* ((line-end (max 0 (+ *inter-atom-h-spacing*
+			     (aref *line-endings* row))))
+	 (newadj (- line-end (- col (max size adj)))))
+    (max adj (min (max newadj 0) size))))
+
+(defun struct-record-position (row end-col)
+  (setf (aref *line-endings* row) end-col))
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;
+;;; SDRAW-LOOP and subordinate definitions.
+
+(defparameter *sdraw-loop-prompt-string* "S> ")
+
+(defun sdraw-loop ()
+  "Read-eval-print loop using sdraw to display results."
+  (clear-window)
+  (clear-term)
+  (format t "Type any Lisp expression, or :ABORT or ^C to exit.~%")
+  (unwind-protect
+      (sdl1)
+    (reset-terminal)))
+
+(defun sdl1 ()
+  (loop
+    (setup-terminal)
+    (princ *sdraw-loop-prompt-string*)
+    (send *terminal-io* :set-cursorpos 3 2)
+    (clear-input *terminal-io*)
+    (multiple-value-bind (form error) (ignore-errors (read))
+      (terpri *terminal-io*)
+      (cond (error (display-sdl-error error))
+	(t (setf +++ ++
+		 ++  +
+	    	 +   -
+		 -   form)))
+      (if (equal form :abort) (return))
+      (multiple-value-bind (result error) (ignore-errors (eval form))
+	(cond (error (display-sdl-error error))
+	  (t (setf /// //
+		   //  /
+		   /   result)
+	     (display-sdl-result result)))))))
+
+(defun display-sdl-result (result)
+  (let* ((*print-circle* (if (boundp '*sdraw-print-circle*)
+			     *sdraw-print-circle*
+		             *print-circle*))
+	 (*print-length* nil)
+	 (*print-level* nil)
+	 (*print-pretty* nil)
+	 (full-text (format nil "Result:  ~S" result))
+	 (text (if (> (length full-text)
+		      *sdraw-display-width*)
+		   (string-append
+		     (subseq full-text 0 (- *sdraw-display-width* 4))
+		     "...)")
+		   full-text)))
+  (sdraw result)
+  (when (consp result)
+    (send *terminal-io* :set-cursorpos 0 0)
+    (format t "~A" text))
+  (terpri)))
+
+(defun display-sdl-error (error)
+  (format t "~A~%~%" error))
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;
+;;; SCRAWL and subordinate definitions.
+
+(defparameter *scrawl-prompt-string* "SCRAWL> ")
+(defvar *scrawl-object* nil)
+(defvar *scrawl-current-obj*)
+(defvar *extracting-sequence* nil)
+
+(defun scrawl (obj)
+  "Read-eval-print loop to travel through list"
+  (setup-terminal)
+  (clear-window)
+  (setf *scrawl-object* obj)
+  (setf *scrawl-current-obj* obj)
+  (setf *extracting-sequence* nil)
+  (sdraw obj)
+  (display-message "Crawl through list, 'Q' to quit, 'H' for help" 0. 21.)
+  (scrawl1)
+  (reset-terminal)
+)
+
+(defun scrawl1 ()
+  (loop
+    (set-term-pos 5. 22.)
+    (let ((prompt *scrawl-prompt-string*))
+       (princ prompt)
+       (set-term-pos (+ 5. (length prompt)) 22.))
+    (let ((command (read-uppercase-char)))
+      (clear-term)
+      (case command
+	(#\A (scrawl-car-cmd))
+	(#\D (scrawl-cdr-cmd))
+	(#\B (scrawl-back-up-cmd))
+	(#\S (scrawl-start-cmd))
+	(#\H (display-scrawl-help))
+	(#\Q (return))
+	(t (display-scrawl-error))))))
+
+(defun scrawl-car-cmd ()
+  (cond ((consp *scrawl-current-obj*)
+	 (push 'car *extracting-sequence*)
+	 (setf *scrawl-current-obj* (car *scrawl-current-obj*))
+	 (display-scrawl-result))
+	(t (display-message
+	     "Can't take CAR or CDR of an atom.  Use B to back up." 0. 19.))))
+
+(defun scrawl-cdr-cmd ()
+  (cond ((consp *scrawl-current-obj*)
+	 (push 'cdr *extracting-sequence*)
+	 (setf *scrawl-current-obj* (cdr *scrawl-current-obj*))
+	 (display-scrawl-result))
+	(t (display-message
+	     "Can't take CAR or CDR of an atom.  Use B to back up." 0. 19.))))
+
+(defun scrawl-back-up-cmd ()
+  (cond (*extracting-sequence*
+	 (pop *extracting-sequence*)
+	 (setf *scrawl-current-obj*
+	       (extract-obj *extracting-sequence* *scrawl-object*))
+	 (display-scrawl-result))
+	(t (display-message "Already at beginning of object." 0. 19.))))
+
+(defun scrawl-start-cmd ()
+  (setf *scrawl-current-obj* *scrawl-object*)
+  (setf *extracting-sequence* nil)
+  (display-scrawl-result))
+
+(defun extract-obj (seq obj)
+  (reduce #'funcall
+	  seq
+	  :initial-value obj
+	  :from-end t))
+
+(defun get-car/cdr-string ()
+  (if (null *extracting-sequence*)
+      (format nil "'~S" *scrawl-object*)
+      (format nil "(c~Ar '~S)"
+	      (apply #'string-append
+		     (mapcar #'(lambda (x)
+				 (case x (car "a") (cdr "d")))
+			     *extracting-sequence*))
+	      *scrawl-object*)))
+
+(defun display-scrawl-result (&aux (*print-pretty* nil)
+				   (*print-length* nil)
+				   (*print-level* nil)
+				   (*print-circle* t))
+  (let* ((extract-string (get-car/cdr-string))
+	 (text (if (> (length extract-string) *sdraw-display-width*)
+		   (string-append
+		    (subseq extract-string 0
+			    (- *sdraw-display-width* 4))
+		    "...)")
+		   extract-string)))
+    (clear-window)
+    (sdraw *scrawl-current-obj*)
+    (display-message text 0. 18.)))
+
+(defun display-scrawl-help ()
+  (display-message "Legal commands:  A)car   D)cdr  B)back up" 0. 20.)
+  (display-message "                 S)start Q)quit H)help" 0. 21.))
+
+(defun display-scrawl-error ()
+  (display-message "Illegal command." 0. 19.)
+  (display-scrawl-help))
+
+(defun read-uppercase-char ()
+  (let ((in (send *terminal-io* :read-char)))
+    (char-upcase in)))
+
+(defun display-message (msg col row)
+  (set-term-pos col (- row 18))
+  (princ msg))
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;
+;;; Everything below this line is specific to the
+;;; "Golden Common Lisp" implementation, and is not
+;;; referenced directly by SDRAW.LISP.  The only exception
+;;; is DRAW-STRUCTURE (called by SDRAW).
+
+(defvar *cons-string* '(222. 219. 222. 219.))
+(defvar *cons-cell-flatsize* 4.)
+(defvar *cons-h-arrowshaft* 196.)
+(defvar *cons-h-arrowhead* 62.)
+(defvar *cons-v-line* 179.)
+(defvar *cons-v-arrowhead* 245.)
+
+(defvar *window*
+  (make-window-stream :left 0 :top 0 :width 80. :height 19.))
+
+(defvar sys::*monitor-is-color*)
+(defconstant normal-att (if sys::*monitor-is-color* #x0f #x07))
+(defconstant cons-att   (if sys::*monitor-is-color* #x0b normal-att))
+(defconstant msg-att    (if sys::*monitor-is-color* #x0e normal-att))
+
+(defmacro with-attribute ((att &optional (stream '*terminal-io*)) &body body)
+  `(let ((oldatt (send ,stream :attribute)))
+     (unwind-protect (progn (send ,stream :set-attribute ,att) . ,body)
+       (send ,stream :set-attribute oldatt))))
+
+(defun setup-terminal ()
+  (send *terminal-io* :set-position 0 19.)
+  (send *terminal-io* :set-size 80. 6.)
+  (send *terminal-io* :set-cursorpos 0 2))
+
+(defun reset-terminal ()
+  (send *terminal-io* :set-position 0 0)
+  (send *terminal-io* :set-size 80. 25.)
+  (send *terminal-io* :set-cursorpos 79. 24.)
+  (terpri))
+
+(defun clear-term () (send *terminal-io* :clear-screen))
+(defun set-term-pos (x y) (send *terminal-io* :set-cursorpos x y))
+
+(defun write-window (x) (write-char (character x) *window*))
+(defun set-window-pos (x y) (send *window* :set-cursorpos x y))
+(defun clear-window () (send *window* :clear-screen))
+
+(defun draw-structure (directions)
+  (when *sdraw-leading-arrow* (draw-leading-arrow))
+  (follow-directions directions))
+
+(defun draw-leading-arrow ()
+  (set-window-pos 0 0)
+  (dotimes (i (1- *leading-arrow-length*))
+    (write-window *cons-h-arrowhead*))
+  (write-window *cons-h-arrowshaft*))
+
+(defun follow-directions (dirs &optional is-car)
+  (case (car dirs)
+    (cons (draw-cons dirs))
+    ((atom msg) (draw-msg dirs is-car))))
+
+(defun draw-cons (obj)
+  (let* ((row (second obj))
+	 (col (third obj))
+	 (car-component (nth 3 obj))
+	 (cdr-component (nth 4 obj))
+	 (string (nth 5 obj))
+	 (h-arrow-start (+ col *cons-cell-flatsize*))
+	 (h-arrowhead-col (1- (third cdr-component)))
+	 (cdr-string? (if (eq 'cons (first cdr-component))
+			  (nth 5 cdr-component)
+			  (nth 4 cdr-component))))
+    (if cdr-string? (decf h-arrowhead-col (length cdr-string?)))
+    (set-window-pos (- col (length string)) row)
+    (with-attribute (cons-att *window*)
+      (when string (send *window* :write-string string)) 
+      (mapc #'write-window *cons-string*)
+      (do ((i h-arrow-start (1+ i)))
+          ((>= i h-arrowhead-col))
+	(write-window *cons-h-arrowshaft*))
+      (write-window *cons-h-arrowhead*)
+      (set-window-pos (1+ col) (+ row 1))
+      (write-window *cons-v-line*)
+      (set-window-pos (1+ col) (+ row 2))
+      (write-window *cons-v-arrowhead*))
+    (follow-directions car-component t)
+    (follow-directions cdr-component nil)))
+
+(defun draw-msg (obj is-car)
+  (let ((row (second obj))
+	(col (third obj))
+	(string (nth 3 obj))
+	(circ-string (nth 4 obj)))
+    (with-attribute (msg-att *window*)
+      (set-window-pos (+ col (if (and is-car
+				      (<= (length string)
+					  *cons-v-arrow-offset-threshold*))
+				 *cons-v-arrow-offset-value* 0))
+		      row)
+      (when circ-string (send *window* :write-string string))
+      (send *window* :write-string string))))
+

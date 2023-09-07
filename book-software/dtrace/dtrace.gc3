@@ -1,0 +1,296 @@
+;;; DTRACE is a portable alternative to the Common Lisp TRACE and UNTRACE
+;;; macros.  It offers a more detailed display format than the tracing
+;;; tool most Common Lisp implementations provide.
+;;;
+;;; From the book "Common Lisp:  A Gentle Introduction to
+;;;      Symbolic Computation" by David S. Touretzky.  
+;;; The Benjamin/Cummings Publishing Co., 1990.
+;;;
+;;; This version is for Golden Common Lisp version 3.1 and up.
+;;;
+;;; User-level routines:
+;;;   DTRACE  - same syntax as TRACE
+;;;   DUNTRACE - same syntax as UNTRACE
+;;;
+;;; Copyright (c) 1988,1989 Symbolic Technology, Ltd.
+;;; This software may not be sold or used for commercial purposes without 
+;;; prior written permission from the copyright holder.
+
+(setq gclisp:*inhibit-system-redefinition-warnings* t)
+
+(in-package "DTRACE" :use '("LISP" "GCLISP"))
+
+(export '(dtrace::dtrace dtrace::duntrace))
+
+(shadowing-import '(dtrace::dtrace dtrace::duntrace)
+		  (find-package "USER"))
+
+(use-package "DTRACE" "USER")
+
+(defvar *system-packages*)
+(defconstant *system-package-names*
+ '("LISP" "GCLISP" "SYSTEM" "SYSTEM-INTERNAL" "COMPILER" "GMACS" "EPI"
+	  "NREAD" "EXPLORER" "DT" "DBG" "DOS" "BACKEND-336" "BACKEND-286"
+	  "DTRACE"))
+
+(eval-when (eval load)
+  (setq *system-packages* (mapcar #'find-package *system-package-names*)))
+
+(defun systemp (x) 
+  (and (symbolp x) (member (symbol-package x) *system-packages*)))
+
+;;; DTRACE and related routines.
+
+(defparameter *dtrace-print-length* 7)
+(defparameter *dtrace-print-level*  4)
+(defparameter *dtrace-print-circle* t)
+(defparameter *dtrace-print-pretty* nil)
+(defparameter *dtrace-print-array* *print-array*)
+
+(defvar *traced-functions* nil)
+(defvar *trace-level* 0)
+
+(defmacro dtrace (&rest function-names)
+  "Turns on detailed tracing for specified functions.  Undo with DUNTRACE."
+  (if (null function-names)
+      (list 'quote *traced-functions*)
+      (list 'quote (mapcan #'dtrace1 function-names))))
+
+(defun dtrace1 (name)
+  (unless (symbolp name)
+    (format *error-output* "~&~S is an invalid function name." name)
+    (return-from dtrace1 nil))
+  (unless (fboundp name)
+    (format *error-output* "~&~S undefined function." name)
+    (return-from dtrace1 nil))
+  (when (special-form-p name)
+    (format *error-output*
+	    "~&Can't trace ~S because it's a special form." name)
+    (return-from dtrace1 nil))
+  (when (systemp name)
+    (format t "~%Warning:  ~S is a system function.  Tracing certain~%" name)
+    (format t "  system functions can lead to unrecoverable errors.~%")
+    (if (y-or-n-p "Are you positive you want to dtrace ~S ? " name)
+        nil
+        (return-from dtrace1 nil)))
+  (eval `(untrace ,name))	;if they're tracing it, undo their trace
+  (duntrace1 name)		;if we're already tracing it, undo our trace
+  (if (macro-function name)
+      (trace-macro name)
+      (trace-function name))
+  (setf *traced-functions* (nconc *traced-functions* (list name)))
+  (list name))
+
+; The functions below reference DISPLAY-... routines that are implementation-specific.
+; These routines are defined at the end of the file.
+
+(defun trace-function (name)
+  (let* ((formal-arglist (fetch-arglist name))
+	 (old-defn (symbol-function name))
+	 (new-defn
+	  #'(lambda (&rest argument-list)
+	       (let ((result nil))
+		 (display-function-entry name)
+		 (let ((*trace-level* (1+ *trace-level*)))
+		   (with-dtrace-printer-settings
+		     (show-function-args argument-list formal-arglist))
+		   (setf result
+			 (multiple-value-list
+			   (apply old-defn argument-list))))
+		 (display-function-return name result)
+		 (values-list result)))))
+    (setf (get name 'original-definition) old-defn)
+    (setf (get name 'traced-definition) new-defn) ;in case function was re-DEFUN'ed while traced
+    (setf (get name 'traced-type) 'defun)
+    (setf (symbol-function name) new-defn)))
+
+(defun trace-macro (name)
+  (let* ((formal-arglist (fetch-arglist name))
+	 (old-defn (macro-function name))
+	 (new-defn (cons 'macro
+	  #'(lambda (macro-args)
+	      (let ((result nil))
+		(display-function-entry name 'macro)
+		(let ((*trace-level* (1+ *trace-level*)))
+		  (with-dtrace-printer-settings
+		    (show-function-args macro-args formal-arglist))
+		  (setf result
+			(funcall old-defn (cdr macro-args))))
+		(display-function-return name (list result) 'macro)
+		(values result))))))
+    (setf (get name 'original-definition) old-defn)
+    (setf (get name 'traced-definition) new-defn) ;in case function was re-DEFUN'ed while traced
+    (setf (get name 'traced-type) 'defmacro)
+    (setf (symbol-function name) new-defn)))
+
+
+(defun show-function-args (actuals formals &optional (argcount 0))
+  (cond ((null actuals) nil)
+	((null formals) (handle-args-numerically actuals argcount))
+	(t (case (first formals)
+	     (&optional (show-function-args actuals (rest formals) argcount))
+	     (&rest (show-function-args (list actuals) (rest formals) argcount))
+	     (&key (handle-keyword-args actuals))
+	     (&aux (show-function-args actuals nil argcount))
+	     (t (handle-one-arg (first actuals) (first formals))
+		(show-function-args (rest actuals) (rest formals) (1+ argcount)))))))
+
+(defun handle-args-numerically (actuals argcount)
+  (dolist (x actuals)
+    (incf argcount)
+    (display-arg-numeric x argcount)))
+
+(defun handle-one-arg (val varspec)
+  (cond ((atom varspec) (display-one-arg val varspec))
+	(t (display-one-arg val (first varspec))
+	   (if (third varspec)
+	       (display-one-arg t (third varspec))))))
+
+(defun handle-keyword-args (actuals)
+  (cond ((null actuals))
+	((keywordp (first actuals))
+	 (display-one-arg (second actuals) (first actuals))
+	 (handle-keyword-args (rest (rest actuals))))
+	(t (display-one-arg actuals "Extra args:"))))
+
+
+
+;;; DUNTRACE and related routines.
+
+(defmacro duntrace (&rest function-names)
+  "Turns off tracing for specified functions.  With no args, turns off all tracing."
+  (setf *trace-level* 0)  ;safety precaution in case things got broken
+  (list 'quote (mapcan #'duntrace1 (or function-names *traced-functions*))))
+
+(defun duntrace1 (name)
+  (unless (symbolp name)
+    (format *error-output* "~&~S is an invalid function name." name)
+    (return-from duntrace1 nil))
+  (setf *traced-functions* (delete name *traced-functions*))
+  (let ((orig-defn (get name 'original-definition 'none))
+	(traced-defn (get name 'traced-definition))
+	(traced-type (get name 'traced-type 'none)))
+    (unless (or (eq orig-defn 'none)
+		(not (fboundp name))
+		(not (equal traced-defn
+			 (case traced-type
+			   (defun (symbol-function name))
+			   (defmacro (symbol-function name))))))  ;in case redefined
+      (case traced-type
+	(defun (setf (symbol-function name) orig-defn))
+	(defmacro (setf (symbol-function name) orig-defn)))))
+  (remprop name 'traced-definition)
+  (remprop name 'traced-type)
+  (remprop name 'original-definition)
+  (list name))
+
+
+;;; Display routines.
+
+; The code below generates vanialla character output for ordinary terminals.
+; It can be replaced with special graphics code if the implementation permits,
+; e.g., on a PC you can use the IBM graphic character set to draw nicer looking
+; arrows.  On a color PC you can use different colors for arrows, for function,
+; names, for argument values, and so on.
+(defconstant normal-att #x07)
+(defconstant arrow-att (if sys::*monitor-is-color* #x0e normal-att))
+(defconstant enter-att (if sys::*monitor-is-color* #x0f normal-att))
+(defconstant args-att  (if sys::*monitor-is-color* #x0e normal-att))
+(defconstant fname-att (if sys::*monitor-is-color* #x0b normal-att))
+
+(defmacro with-attribute ((att &optional (stream '*terminal-io*)) &body body)
+  `(let ((oldatt (send ,stream :attribute)))
+     (unwind-protect (progn (send ,stream :set-attribute ,att) . ,body)
+       (send ,stream :set-attribute oldatt))))
+
+(defmacro with-dtrace-printer-settings (&body body)
+  `(let ((*print-length* *dtrace-print-length*)
+	 (*print-level* *dtrace-print-level*)
+	 (*print-circle* *dtrace-print-circle*)
+	 (*print-array* *dtrace-print-array*)
+	 (*print-pretty* *dtrace-print-pretty*))
+     ,@body))
+
+(defparameter *entry-arrow-string* '(201. 205. 205. 175.))
+(defparameter *vertical-arrow*	'(186.))
+(defparameter *exit-arrow-string*  '(200. 205. 205. 175.))
+
+(defun send-char (stream x)
+  (dolist (i x)
+    (with-attribute (arrow-att *trace-output*)
+      (send stream :write-char i))))
+
+(defparameter *trace-wraparound* 15)
+
+(defun display-function-entry (name &optional ftype)
+  (space-over)
+  (draw-entry-arrow)
+  (with-attribute (enter-att *trace-output*)
+    (format *trace-output* "Enter "))
+  (with-attribute (fname-att *trace-output*)
+    (format *trace-output* "~S" name))
+  (if (eq ftype 'macro)
+      (format *trace-output* " macro")))
+
+(defun display-one-arg (val name)
+  (space-over)
+  (with-attribute (args-att *trace-output*)
+    (if (and (listp (type-of name))
+	     (equal (butlast (type-of name)) '(vector string-char)))
+	(format *trace-output* "  ~A ~S" name val)
+        (format *trace-output*
+		(case (type-of name)
+		  (keyword "  ~S ~S")
+		  (string "  ~A ~S")
+		  (t "  ~S = ~S"))
+	        name val))))
+
+(defun display-arg-numeric (val num)
+  (space-over)
+  (with-attribute (args-att *trace-output*)
+    (format *trace-output* "  Arg-~D = ~S" num val)))
+
+(defun display-function-return (name results &optional ftype)
+  (with-dtrace-printer-settings
+    (space-over)
+    (draw-exit-arrow)
+    (with-attribute (fname-att *trace-output*)
+      (format *trace-output* "~S " name))
+    (with-attribute (enter-att *trace-output*)
+      (format *trace-output* "~A"
+        (if (eq ftype 'macro) "expanded to" "returned")))
+    (with-attribute (args-att *trace-output*)
+      (cond ((null results))
+	    ((null (rest results))
+	      (format *trace-output* " ~S" (first results)))
+	    (t (format *trace-output* " values ~{~S, ~}~s"
+		       (butlast results)
+		       (car (last results))))))))
+
+(defun space-over ()
+  (format *trace-output* "~&")
+    (dotimes (i (mod *trace-level* *trace-wraparound*))
+      (send-char *trace-output* *vertical-arrow*)
+      (format *trace-output* "   ")))
+
+(defun draw-entry-arrow ()
+  (send-char *trace-output* *entry-arrow-string*))
+
+(defun draw-exit-arrow ()
+  (send-char *trace-output* *exit-arrow-string*))
+
+
+;;; Other implementation-specific routines go here.
+
+; The function FETCH-ARGLIST is implementation-specific.  It returns the
+; formal argument list of a function, exactly as the list would appear in
+; a DEFUN or lambda expression.
+;
+;  The version below is for Golden Common Lisp.
+
+(defun fetch-arglist (x)
+  (if (macro-function x)
+      ;; then x is defmacro
+      '(&rest "Form =")
+      ;; else it is normal 
+      (read-from-string (sys:lambda-list x))))

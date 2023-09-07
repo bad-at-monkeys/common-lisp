@@ -1,0 +1,22 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<html>
+ <head>
+  <title>Index of /~dst/Lisp/sdraw</title>
+ </head>
+ <body>
+<h1>Index of /~dst/Lisp/sdraw</h1>
+  <table>
+   <tr><th valign="top"><img src="/icons/blank.gif" alt="[ICO]"></th><th><a href="?C=N;O=D">Name</a></th><th><a href="?C=M;O=A">Last modified</a></th><th><a href="?C=S;O=A">Size</a></th><th><a href="?C=D;O=A">Description</a></th></tr>
+   <tr><th colspan="5"><hr></th></tr>
+<tr><td valign="top"><img src="/icons/back.gif" alt="[PARENTDIR]"></td><td><a href="/~dst/Lisp/">Parent Directory</a></td><td>&nbsp;</td><td align="right">  - </td><td>&nbsp;</td></tr>
+<tr><td valign="top"><img src="/icons/unknown.gif" alt="[   ]"></td><td><a href="sdraw.allegro">sdraw.allegro</a></td><td align="right">2003-08-19 16:40  </td><td align="right"> 22K</td><td>&nbsp;</td></tr>
+<tr><td valign="top"><img src="/icons/unknown.gif" alt="[   ]"></td><td><a href="sdraw.cmucl">sdraw.cmucl</a></td><td align="right">2003-08-19 05:58  </td><td align="right"> 21K</td><td>&nbsp;</td></tr>
+<tr><td valign="top"><img src="/icons/unknown.gif" alt="[   ]"></td><td><a href="sdraw.gc1">sdraw.gc1</a></td><td align="right">1991-08-16 18:11  </td><td align="right"> 11K</td><td>&nbsp;</td></tr>
+<tr><td valign="top"><img src="/icons/unknown.gif" alt="[   ]"></td><td><a href="sdraw.gc3">sdraw.gc3</a></td><td align="right">1991-08-16 18:11  </td><td align="right"> 17K</td><td>&nbsp;</td></tr>
+<tr><td valign="top"><img src="/icons/unknown.gif" alt="[   ]"></td><td><a href="sdraw.generic">sdraw.generic</a></td><td align="right">2003-08-19 00:09  </td><td align="right"> 16K</td><td>&nbsp;</td></tr>
+<tr><td valign="top"><img src="/icons/unknown.gif" alt="[   ]"></td><td><a href="sdraw.gui">sdraw.gui</a></td><td align="right">2018-01-16 00:09  </td><td align="right"> 22K</td><td>&nbsp;</td></tr>
+<tr><td valign="top"><img src="/icons/unknown.gif" alt="[   ]"></td><td><a href="sdraw.lucid">sdraw.lucid</a></td><td align="right">1991-08-16 18:11  </td><td align="right"> 21K</td><td>&nbsp;</td></tr>
+   <tr><th colspan="5"><hr></th></tr>
+</table>
+<address>Apache/2.4.18 (Ubuntu) Server at www.cs.cmu.edu Port 80</address>
+</body></html>

@@ -1,0 +1,249 @@
+;;; -*- Mode: Lisp -*-
+
+;;; DTRACE is a portable alternative to the Common Lisp TRACE and UNTRACE
+;;; macros.  It offers a more detailed display format than the tracing
+;;; tool most Common Lisp implementations provide.
+;;;
+;;; From the book "Common Lisp:  A Gentle Introduction to
+;;;      Symbolic Computation" by David S. Touretzky.  
+;;; The Benjamin/Cummings Publishing Co., 1990.
+;;;
+;;; User-level routines:
+;;;   DTRACE  - same syntax as TRACE
+;;;   DUNTRACE - same syntax as UNTRACE
+;;;
+;;; This version is for Apple Macintosh Common Lisp, MCL 2.0.
+;;; Implementation-dependent features:
+;;;    Must write CCL::ARGLIST because it's not in the COMMON-LISP
+;;;      package in this version of MCL.
+;;;    CCL::*WARN-IF-REDEFINE-KERNEL* must be bound to NIL before we
+;;;      muck with any function cell, because symbols in the COMMON-LISP
+;;;      and CCL packages are protected against redefinition.
+;;;    CCL::*SAVE-DEFINITIONS* must be T to preserve arglist info.
+;;;    CCL::*COMPILE-DEFINITIONS* must be NIL to see recursive calls.
+;;;      The reason is that in compiled code, recursive calls aren't 
+;;;      linked through the symbol's function cell.  Even the built-in
+;;;      TRACE package fails to trace recursive calls in compiled code.
+;;;
+;;; Copyright (c) 1988,1989,1994 Symbolic Technology, Ltd.
+;;;
+;;; This software may not be sold or used for commercial purposes without 
+;;; prior written permission from the copyright holder.
+
+(defpackage "DTRACE"
+  (:use "COMMON-LISP")
+  (:export dtrace duntrace
+	   *dtrace-print-length* *dtrace-print-level*
+	   *dtrace-print-circle* *dtrace-print-pretty*
+	   *dtrace-print-array*))
+
+(in-package "DTRACE")	    
+
+(eval-when (eval load)
+  (shadowing-import '(dtrace duntrace) (find-package "COMMON-LISP-USER")))
+
+(defvar *traced-functions* nil) ;list of currently traced functions
+(defvar *trace-level* 0) ;level of nesting of traced function calls
+
+(defparameter *dtrace-print-length* 7)
+(defparameter *dtrace-print-level*  4)
+(defparameter *dtrace-print-circle* t)
+(defparameter *dtrace-print-pretty* nil)
+(defparameter *dtrace-print-array* *print-array*)
+
+(defmacro with-dtrace-printer-settings (&body body)
+  `(let ((*print-length* *dtrace-print-length*)
+	 (*print-level* *dtrace-print-level*)
+	 (*print-circle* *dtrace-print-circle*)
+	 (*print-pretty* *dtrace-print-pretty*)
+	 (*print-array* *dtrace-print-array*))
+     ,@body))
+
+(defparameter *trace-wraparound* 15
+  "Number of characters of indentation at which wraparound occurs")
+
+
+;;; Code specific to Apple Macintosh Common Lisp
+
+(setf ccl::*save-definitions* t)
+(setf ccl::*compile-definitions* nil)
+
+
+;;; DTRACE and related routines.
+
+(defmacro dtrace (&rest function-names)
+  "Turns on detailed tracing for specified functions.  Undo with DUNTRACE."
+  (if (null function-names)
+      (list 'quote *traced-functions*)
+      (list 'quote (mapcan #'dtrace1 function-names))))
+
+(defun dtrace1 (name)
+  (unless (symbolp name)
+    (format *error-output* "~&~S is an invalid function name." name)
+    (return-from dtrace1 nil))
+  (unless (fboundp name)
+    (format *error-output* "~&~S undefined function." name)
+    (return-from dtrace1 nil))
+  (eval `(untrace ,name))	;if they're tracing it, undo their trace
+  (duntrace1 name)		;if we're already tracing it, undo our trace
+  (when (special-form-p name)
+    (format *error-output*
+	    "~&Can't trace ~S because it's a special form." name)
+    (return-from dtrace1 nil))
+  (if (macro-function name)
+      (trace-macro name)
+      (trace-function name))
+  (setf *traced-functions* (nconc *traced-functions* (list name)))
+  (list name))
+
+(defun trace-function (name)
+  (let* ((formal-arglist (ccl::arglist name))
+	 (old-defn (symbol-function name))
+	 (new-defn
+	  #'(lambda (&rest argument-list)
+	      (let ((result nil))
+		(display-function-entry name)
+		(let ((*trace-level* (1+ *trace-level*)))
+		  (with-dtrace-printer-settings
+		   (show-function-args argument-list formal-arglist))
+		  (setf result (multiple-value-list (apply old-defn argument-list))))
+		(display-function-return name result)
+		(values-list result)))))
+    (setf (get name 'original-definition) old-defn)
+    (setf (get name 'traced-definition) new-defn) ;in case function was re-DEFUN'ed while traced
+    (setf (get name 'traced-type) 'defun)
+    (let ((ccl::*warn-if-redefine-kernel* nil))
+      (setf (symbol-function name) new-defn))))
+
+(defun trace-macro (name)
+  (let* ((formal-arglist (ccl::arglist name))
+	 (old-defn (macro-function name))
+	 (new-defn
+	  #'(lambda (macro-args env)
+	      (let ((result nil))
+		(display-function-entry name 'macro)
+		(let ((*trace-level* (1+ *trace-level*)))
+		  (with-dtrace-printer-settings
+		   (show-function-args macro-args formal-arglist))
+		  (setf result (funcall old-defn macro-args env)))
+	(display-function-return name (list result) 'macro)
+		(values result)))))
+    (setf (get name 'original-definition) old-defn)
+    (setf (get name 'traced-definition) new-defn) ;in case function was re-DEFUN'ed while traced
+    (setf (get name 'traced-type) 'defmacro)
+    (setf (macro-function name) new-defn)))
+
+
+(defun show-function-args (actuals formals &optional (argcount 0))
+  (cond ((null actuals) nil)
+	((null formals) (handle-args-numerically actuals argcount))
+	(t (case (first formals)
+	     (&optional (show-function-args actuals (rest formals) argcount))
+	     (&rest (show-function-args (list actuals) (rest formals) argcount))
+	     (&key (handle-keyword-args actuals))
+	     (&aux (show-function-args actuals nil argcount))
+	     (t (handle-one-arg (first actuals) (first formals))
+		(show-function-args (rest actuals) (rest formals) (1+ argcount)))))))
+
+(defun handle-args-numerically (actuals argcount)
+  (dolist (x actuals)
+    (incf argcount)
+    (display-arg-numeric x argcount)))
+
+(defun handle-one-arg (val varspec)
+  (cond ((atom varspec) (display-one-arg val varspec))
+	(t (display-one-arg val (first varspec))
+	   (if (third varspec)
+	       (display-one-arg t (third varspec))))))
+
+(defun handle-keyword-args (actuals)
+  (cond ((null actuals))
+	((keywordp (first actuals))
+	 (display-one-arg (second actuals) (first actuals))
+	 (handle-keyword-args (rest (rest actuals))))
+	(t (display-one-arg actuals "Extra args:"))))
+
+
+
+;;; DUNTRACE and related routines.
+
+(defmacro duntrace (&rest function-names)
+  "Turns off tracing for specified functions.  With no args, turns off all tracing."
+  (setf *trace-level* 0)  ;safety precaution in case things got broken
+  (list 'quote (mapcan #'duntrace1 (or function-names *traced-functions*))))
+
+(defun duntrace1 (name)
+  (unless (symbolp name)
+    (format *error-output* "~&~S is an invalid function name." name)
+    (return-from duntrace1 nil))
+  (setf *traced-functions* (delete name *traced-functions*))
+  (let ((orig-defn (get name 'original-definition 'none))
+	(traced-defn (get name 'traced-definition))
+	(traced-type (get name 'traced-type 'none)))
+    (unless (or (eq orig-defn 'none)
+		(not (fboundp name))
+		(not (equal traced-defn
+			    (ecase traced-type
+			      (defun (symbol-function name))
+			      (defmacro (macro-function name))))))  ;in case redefined
+      (let ((ccl::*warn-if-redefine-kernel* nil))
+	(ecase traced-type
+		(defun (setf (symbol-function name) orig-defn))
+		(defmacro (setf (macro-function name) orig-defn)))))
+    (remprop name 'traced-definition)
+    (remprop name 'traced-type)
+    (remprop name 'original-definition)
+    (list name)))
+
+
+;;; Display routines
+
+(defparameter *entry-arrow-string* "----")
+(defparameter *vertical-string*    "|   ")
+(defparameter *exit-arrow-string*  " \\--")
+
+
+(defun display-function-entry (name &optional ftype)
+  (space-over)
+  (draw-entry-arrow)
+  (format *trace-output* "Enter ~S" name)
+  (if (eq ftype 'macro)
+      (format *trace-output* " macro")))
+
+(defun display-one-arg (val name)
+  (space-over)
+  (format *trace-output*
+	  (typecase name
+	    (keyword "  ~S ~S")
+	    (string  "  ~A ~S")
+	    (t "  ~S = ~S"))
+	  name val))
+
+(defun display-arg-numeric (val num)
+  (space-over)
+  (format *trace-output* "  Arg-~D = ~S" num val))
+
+(defun display-function-return (name results &optional ftype)
+  (with-dtrace-printer-settings
+    (space-over)
+    (draw-exit-arrow)
+    (format *trace-output* "~S ~A"
+	    name
+	    (if (eq ftype 'macro) "expanded to" "returned"))
+    (cond ((null results))
+	  ((null (rest results)) (format *trace-output* " ~S" (first results)))
+	  (t (format *trace-output* " values ~{~S, ~}~s"
+		     (butlast results)
+		     (car (last results)))))))
+
+(defun space-over ()
+  (format *trace-output* "~&")
+  (dotimes (i (mod *trace-level* *trace-wraparound*))
+    (format *trace-output* "~A" *vertical-string*)))
+
+(defun draw-entry-arrow ()
+  (format *trace-output* "~A" *entry-arrow-string*))
+
+(defun draw-exit-arrow ()
+  (format *trace-output* "~A" *exit-arrow-string*))
+

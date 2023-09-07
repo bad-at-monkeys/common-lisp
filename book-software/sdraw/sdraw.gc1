@@ -1,0 +1,370 @@
+;;; -*- Mode: Lisp; Package: SDRAW -*-
+;;;
+;;; SDRAW - draws cons cell structures.
+;;;
+;;; From the book "Common Lisp:  A Gentle Introduction to
+;;;      Symbolic Computation" by David S. Touretzky.  
+;;; The Benjamin/Cummings Publishing Co., 1990.
+;;;
+;;; This version is for Golden Common Lisp version 1.01 and 1.1.
+;;;
+;;; ** WARNING ** unlike the other versions of SDRAW, this one has not
+;;;   yet been revised to include the new circular structures code.
+;;;
+;;; User-level routines:
+;;;   (SDRAW obj)  - draws obj on the terminal
+;;;   (SDRAW-LOOP) - puts the user in a read-eval-draw loop
+;;;   (SCRAWL obj) - interactively crawl around obj
+;;;
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;
+;;; The parameters below are in units of characters (horizontal)
+;;; and lines (vertical).  They apply to all versions of SDRAW,
+;;; but their values may change if cons cells are being drawn as
+;;; bit maps rather than as character sequences.
+
+(defvar *sdraw-display-width* 79.)
+(defvar *sdraw-display-height* 25)
+(defvar *sdraw-vertical-cutoff* 22.)
+(defvar *sdraw-horizontal-atom-cutoff* 79.)
+(defvar *sdraw-horizontal-cons-cutoff* 65.)  ; display-width minus length of a cons & longest message
+
+(defvar *etc-string* "etc.")
+(defvar *circ-string* "circ.")
+
+(defvar *etc-spacing* 4.)
+(defvar *circ-spacing* 5.)
+
+(defvar *inter-obj-h-spacing* 3.)
+(defvar *inter-cons-vspacing* 3.)
+(defvar *cons-obj-h-arrow-length* 9.)
+(defvar *inter-cons-v-arrow-length* 3.)
+(defvar *cons-v-arrow-offset-threshold* 2.)
+(defvar *cons-v-arrow-offset-value* 1.)
+
+(defvar *line-endings*
+  (make-array *sdraw-display-height* :initial-element -2))
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;
+;;; SDRAW and subordinate definitions.
+
+(defun sdraw (obj)
+  (dotimes (i (array-length *line-endings*))
+    (setf (aref *line-endings* i) -2))
+  (clear-window)
+  (clear-term)
+  (draw-structure (struct1 obj 0 0 nil))
+  (set-term-pos 0 20.))
+
+(defun struct1 (obj row root-col obj-memory)
+  (cond ((not (consp obj))
+	 (struct-process-atom (format nil "~S" obj) row root-col))
+	((member obj obj-memory :test #'eq)
+	 (struct-process-circ row root-col))
+	((>= row *sdraw-vertical-cutoff*)
+	 (struct-process-etc row root-col))
+	(t (struct-process-cons obj row root-col
+				(cons obj obj-memory)))))
+
+(defun struct-process-atom (atom-string row root-col)
+  (let* ((start-col (struct-find-start row root-col))
+	 (end-col (+ start-col (flatsize atom-string))))
+    (cond ((< end-col *sdraw-horizontal-atom-cutoff*)
+	   (struct-record-position row end-col)
+	   (list 'atom row start-col atom-string))
+	  (t (struct-process-etc row root-col)))))
+
+(defun struct-process-etc (row root-col)
+  (let ((start-col (struct-find-start row root-col)))
+    (struct-record-position
+      row
+      (+ start-col (flatsize *etc-string*) *etc-spacing*))
+    (list 'msg row start-col *etc-string*)))
+
+(defun struct-process-circ (row root-col)
+  (let ((start-col (struct-find-start row root-col)))
+    (struct-record-position
+      row
+      (+ start-col (flatsize *circ-string*) *circ-spacing*))
+    (list 'msg row start-col *circ-string*)))
+
+(defun struct-process-cons (obj row root-col obj-memory)
+  (let* ((cons-start (struct-find-start row root-col))
+	 (car-structure
+	  (struct1 (car obj)
+		   (+ row *inter-cons-v-arrow-length*) cons-start obj-memory))
+	 (start-col (third car-structure)))
+    (if (>= start-col *sdraw-horizontal-cons-cutoff*)
+	(struct-process-etc row root-col)
+	(list 'cons row start-col car-structure
+	      (struct1 (cdr obj) row
+		       (+ start-col *cons-obj-h-arrow-length*) obj-memory)))))
+
+(defun struct-find-start (row root-col)
+  (max root-col (+ *inter-obj-h-spacing* (aref *line-endings* row))))
+
+(defun struct-record-position (row end-col)
+  (setf (aref *line-endings* row) end-col))
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;
+;;; SDRAW-LOOP and subordinate definitions.
+
+(defparameter *sdraw-loop-prompt-string* "S> ")
+
+(defun sdraw-loop ()
+  "Read-eval-print loop using sdraw to display results."
+  (clear-term)
+  (format t "Type any Lisp expression, or (ABORT) to exit.")
+  (sdl1)
+  (reset-terminal))
+
+(defun sdl1 ()
+  (loop
+    (setup-terminal)
+    (format t "~&~A" *sdraw-loop-prompt-string*)
+    (multiple-value-bind (form error) (ignore-errors (read))
+      (cond (error (display-sdl-error error))
+	(t (setf +++ ++
+		 ++  +
+	    	 +   -
+		 -   form)))
+      (if (equal form '(abort)) (return))
+      (multiple-value-bind (result error) (ignore-errors (eval form))
+	(cond (error (display-sdl-error error))
+	  (t (setf /// //
+		   //  /
+		   /   result)
+	     (display-sdl-result result)))))))
+
+(defun display-sdl-result (result)
+  (let* ((*print-circle* t)
+	 (*print-length* nil)
+	 (*print-level* nil)
+	 (*print-pretty* nil)
+	 (full-text (format nil "Result:  ~S" result))
+	 (text (if (> (length full-text)
+		      *sdraw-display-width*)
+		   (string-append
+		     (subseq full-text 0 (- *sdraw-display-width* 4))
+		     "...)")
+		   full-text)))
+  (sdraw result)
+  (if (consp result)
+      (format t "~%~A~%" text))
+  (terpri)))
+
+(defun display-sdl-error (error)
+  (format t "~A~%~%" error))
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;
+;;; SCRAWL and subordinate definitions.
+
+(defparameter *scrawl-prompt-string* "SCRAWL> ")
+(defvar *scrawl-object* nil)
+(defvar *scrawl-current-obj*)
+(defvar *extracting-sequence* nil)
+
+(defun scrawl (obj)
+  "Read-eval-print loop to travel through list"
+  (setup-terminal)
+  (clear-window)
+  (setf *scrawl-object* obj)
+  (setf *scrawl-current-obj* obj)
+  (setf *extracting-sequence* nil)
+  (sdraw obj)
+  (display-message "Crawl through list, 'Q' to quit, 'H' for help" 0. 21.)
+  (scrawl1)
+  (reset-terminal)
+)
+
+(defun scrawl1 ()
+  (loop
+    (set-term-pos 5. 22.)
+    (let ((prompt *scrawl-prompt-string*))
+       (princ prompt)
+       (set-term-pos (+ 5. (length prompt)) 22.))
+    (let ((command (read-uppercase-char)))
+      (clear-term)
+      (case command
+	(#\A (scrawl-car-cmd))
+	(#\D (scrawl-cdr-cmd))
+	(#\B (scrawl-back-up-cmd))
+	(#\S (scrawl-start-cmd))
+	(#\H (display-scrawl-help))
+	(#\Q (return))
+	(t (display-scrawl-error))))))
+
+(defun scrawl-car-cmd ()
+  (cond ((consp *scrawl-current-obj*)
+	 (push 'car *extracting-sequence*)
+	 (setf *scrawl-current-obj* (car *scrawl-current-obj*))
+	 (display-scrawl-result))
+	(t (display-message
+	     "Can't take CAR or CDR of an atom.  Use B to back up." 0. 19.))))
+
+(defun scrawl-cdr-cmd ()
+  (cond ((consp *scrawl-current-obj*)
+	 (push 'cdr *extracting-sequence*)
+	 (setf *scrawl-current-obj* (cdr *scrawl-current-obj*))
+	 (display-scrawl-result))
+	(t (display-message
+	     "Can't take CAR or CDR of an atom.  Use B to back up." 0. 19.))))
+
+(defun scrawl-back-up-cmd ()
+  (cond (*extracting-sequence*
+	 (pop *extracting-sequence*)
+	 (setf *scrawl-current-obj*
+	       (extract-obj *extracting-sequence* *scrawl-object*))
+	 (display-scrawl-result))
+	(t (display-message "Already at beginning of object." 0. 19.))))
+
+(defun scrawl-start-cmd ()
+  (setf *scrawl-current-obj* *scrawl-object*)
+  (setf *extracting-sequence* nil)
+  (display-scrawl-result))
+
+(defun extract-obj (seq obj)
+  (if (null seq) obj
+    (extract-obj (butlast seq) (funcall (car (last seq)) obj))))
+
+(defun get-car/cdr-string ()
+  (if (null *extracting-sequence*)
+      (format nil "'~S" *scrawl-object*)
+      (format nil "(c~Ar '~S)"
+	      (apply #'string-append
+		     (mapcar #'(lambda (x)
+				 (case x (car "a") (cdr "d")))
+			     *extracting-sequence*))
+	      *scrawl-object*)))
+
+(defun display-scrawl-result (&aux (*print-pretty* nil)
+				   (*print-length* nil)
+				   (*print-level* nil)
+				   (*print-circle* t))
+  (let* ((extract-string (get-car/cdr-string))
+	 (text (if (> (length extract-string) *sdraw-display-width*)
+		   (string-append
+		    (subseq extract-string 0
+			    (- *sdraw-display-width* 4))
+		    "...)")
+		   extract-string)))
+    (clear-window)
+    (sdraw *scrawl-current-obj*)
+    (display-message text 0. 18.)))
+
+(defun display-scrawl-help ()
+  (display-message "Legal commands:  A)car   D)cdr  B)back up" 0. 20.)
+  (display-message "                 S)start Q)quit H)help" 0. 21.))
+
+(defun display-scrawl-error ()
+  (display-message "Illegal command." 0. 19.)
+  (display-scrawl-help))
+
+(defun read-uppercase-char ()
+  (let ((in (send *terminal-io* :read-char)))
+    (char-upcase in)))
+
+(defun display-message (msg col row)
+  (set-term-pos col (- row 18))
+  (princ msg))
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;
+;;; Everything below this line is specific to the
+;;; "Golden Common Lisp" implementation, and is not
+;;; referenced directly by SDRAW.LISP.  The only exception
+;;; is DRAW-STRUCTURE (called by SDRAW).
+
+(defvar *cons-string* '(222. 219. 222. 219.))
+(defvar *cons-cell-flatsize* 4.)
+(defvar *cons-h-arrowshaft* 196.)
+(defvar *cons-h-arrowhead* 62.)
+(defvar *cons-v-line* 179.)
+(defvar *cons-v-arrowhead* 245.)
+
+(defvar *window*
+  (make-window-stream :left 0 :top 0 :width 80. :height 19.))
+
+(unless (boundp '*monitor-is-color*)  ;version 1.01 vs. version 1.1
+  (setq *monitor-is-color* sys::*monitor-is-color*))
+
+(defconstant normal-att (if *monitor-is-color* #x0f #x07))
+(defconstant cons-att   (if *monitor-is-color* #x0b normal-att))
+(defconstant msg-att    (if *monitor-is-color* #x0e normal-att))
+
+(macro with-attribute (form)
+  (let ((x (if (atom (cadr form)) (cadr form) (caadr form)))
+	(strm (or (and (consp (cadr form))
+		       (cdr (cadr form))
+		       (cadr (cadr form)))
+		  '*terminal-io*))
+	(body (cddr form)))
+    (rplacb form
+      `(let ((oldatt (send ,strm :attribute)))
+         (unwind-protect (progn (send ,strm :set-attribute ,x) . ,body)
+           (send ,strm :set-attribute oldatt))))))
+
+(defun setup-terminal ()
+  (send *terminal-io* :set-position 0 19.)
+  (send *terminal-io* :set-size 80. 6.)
+  (send *terminal-io* :set-cursorpos 0 0))
+
+(defun reset-terminal ()
+  (send *terminal-io* :set-position 0 0)
+  (send *terminal-io* :set-size 80. 25.)
+  (send *terminal-io* :set-cursorpos 79. 24.)
+  (terpri))
+
+(defmacro clear-term () `(send *terminal-io* :clear-screen))
+(defmacro set-term-pos (x y) `(send *terminal-io* :set-cursorpos ,x ,y))
+
+(defun write-window (x) (write-byte x *window*))
+(defmacro set-window-pos (x y) `(send *window* :set-cursorpos ,x ,y))
+(defmacro clear-window () `(send *window* :clear-screen))
+
+(defun draw-structure (directions)
+  (follow-directions directions))
+
+(defun follow-directions (dirs &optional is-car)
+  (case (car dirs)
+    (cons (draw-cons dirs))
+    ((atom msg) (draw-msg  (second dirs) (third dirs) (nth 3 dirs) is-car))))
+
+(defun draw-cons (obj)
+  (let* ((row (second obj))
+	 (col (third obj))
+	 (car-component (nth 3 obj))
+	 (cdr-component (nth 4 obj))
+	 (h-arrow-start (+ col *cons-cell-flatsize*))
+	 (h-arrowhead-col (1- (third cdr-component))))
+    (set-window-pos col row)
+    (with-attribute (cons-att *window*)
+      (mapc #'write-window *cons-string*)
+      (do ((i h-arrow-start (1+ i)))
+          ((>= i h-arrowhead-col))
+	(write-window *cons-h-arrowshaft*))
+      (write-window *cons-h-arrowhead*)
+      (set-window-pos (1+ col) (+ row 1))
+      (write-window *cons-v-line*)
+      (set-window-pos (1+ col) (+ row 2))
+      (write-window *cons-v-arrowhead*))
+    (follow-directions car-component t)
+    (follow-directions cdr-component nil)))
+
+(defun draw-msg (row col string is-car)
+  (with-attribute (msg-att *window*)
+    (set-window-pos (+ col (if (and is-car (<= (length string)
+					   *cons-v-arrow-offset-threshold*))
+			*cons-v-arrow-offset-value*
+			0))
+		    row)
+    (princ string *window*)))
+
